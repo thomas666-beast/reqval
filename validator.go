@@ -26,6 +26,11 @@ func engine() *validator.Validate {
 
 // ValidateCtx runs Rules() through the engine and builds a ValidationError
 // from Messages() overrides and the application default bundle.
+//
+// Rules keys may be:
+//   - "Title"            — a struct field
+//   - "items.*.name"     — every element's Name field
+//   - "items.0.name"     — a specific element (0-indexed)
 func ValidateCtx(ctx context.Context, req any) error {
 	r, ok := req.(Request)
 	if !ok {
@@ -50,29 +55,31 @@ func ValidateCtx(ctx context.Context, req any) error {
 		return fmt.Errorf("reqval: request must be a struct or pointer to struct, got %T", req)
 	}
 
-	for field, fieldRules := range rules {
-		fv := rv.FieldByName(field)
-		if !fv.IsValid() {
-			fields[field] = fmt.Sprintf("The %s field does not exist.", field)
+	for path, fieldRules := range rules {
+		targets := resolvePath(rv, path)
+		if len(targets) == 0 {
+			fields[path] = fmt.Sprintf("The %s field does not exist.", path)
 			continue
 		}
-		for _, rule := range fieldRules {
-			name := ruleName(rule)
-			param := ruleParam(rule)
 
-			// confirmed is a cross-field rule: it needs the parent struct.
-			// Handle it here, before dispatch to applyRule.
-			if name == "confirmed" {
-				if !checkConfirmed(rv, field) {
-					fields[field] = messageFor(r, field, name, param)
+		for _, t := range targets {
+			for _, rule := range fieldRules {
+				name := ruleName(rule)
+				param := ruleParam(rule)
+
+				// confirmed is cross-field: it needs the parent struct.
+				if name == "confirmed" {
+					if !checkConfirmed(t.parent, t.fieldName) {
+						fields[t.display] = messageFor(r, t.fieldName, name, param)
+						break
+					}
+					continue
+				}
+
+				if !checkRule(v, t.fieldName, t.value, rule) {
+					fields[t.display] = messageFor(r, t.fieldName, name, param)
 					break
 				}
-				continue
-			}
-
-			if !checkRule(v, field, fv, rule) {
-				fields[field] = messageFor(r, field, name, param)
-				break
 			}
 		}
 	}
@@ -83,20 +90,101 @@ func ValidateCtx(ctx context.Context, req any) error {
 	return nil
 }
 
+// target is one resolved value at a path.
+type target struct {
+	value     reflect.Value // the value to check
+	parent    reflect.Value // the struct that contains the value
+	fieldName string        // bare field name, e.g. "Name"
+	display   string        // path with indexes, e.g. "items.0.name"
+}
+
+// resolvePath walks a dotted path and returns every concrete target.
+// "*" iterates the current slice/array/map.
+func resolvePath(rv reflect.Value, path string) []target {
+	segments := strings.Split(path, ".")
+	return walkPath(rv, segments, "")
+}
+
+func walkPath(rv reflect.Value, segments []string, prefix string) []target {
+	if len(segments) == 0 {
+		return nil
+	}
+	seg := segments[0]
+	rest := segments[1:]
+
+	if seg == "*" {
+		switch rv.Kind() {
+		case reflect.Slice, reflect.Array:
+			out := []target{}
+			for i := 0; i < rv.Len(); i++ {
+				idx := fmt.Sprintf("%s.%d", strings.TrimPrefix(prefix, "."), i)
+				out = append(out, walkPath(rv.Index(i), rest, idx)...)
+			}
+			return out
+		case reflect.Map:
+			out := []target{}
+			iter := rv.MapRange()
+			for iter.Next() {
+				key := fmt.Sprint(iter.Key().Interface())
+				idx := fmt.Sprintf("%s.%s", strings.TrimPrefix(prefix, "."), key)
+				out = append(out, walkPath(iter.Value(), rest, idx)...)
+			}
+			return out
+		default:
+			return nil
+		}
+	}
+
+	if rv.Kind() != reflect.Struct && rv.Kind() != reflect.Ptr {
+		return nil
+	}
+	if rv.Kind() == reflect.Ptr {
+		if rv.IsNil() {
+			return nil
+		}
+		rv = rv.Elem()
+	}
+
+	fv := rv.FieldByName(seg)
+	if !fv.IsValid() {
+		return nil
+	}
+
+	newPrefix := prefix + "." + seg
+	if len(rest) == 0 {
+		return []target{{
+			value:     fv,
+			parent:    rv,
+			fieldName: seg,
+			display:   strings.TrimPrefix(newPrefix, "."),
+		}}
+	}
+
+	return walkPath(fv, rest, newPrefix)
+}
+
 // checkConfirmed compares field with <Field>Confirmation, falling back to
 // <field>_confirmation. Returns false if neither exists.
 func checkConfirmed(rv reflect.Value, field string) bool {
-	parent := rv
+	if rv.Kind() == reflect.Ptr {
+		if rv.IsNil() {
+			return false
+		}
+		rv = rv.Elem()
+	}
+	if rv.Kind() != reflect.Struct {
+		return false
+	}
 
-	conf := parent.FieldByName(field + "Confirmation")
+	conf := rv.FieldByName(field + "Confirmation")
 	if !conf.IsValid() {
-		conf = parent.FieldByName(field + "_confirmation")
+		conf = rv.FieldByName(field + "_confirmation")
 	}
 	if !conf.IsValid() {
 		return false
 	}
 
-	cur := parent.FieldByName(field)
+	cur := rv.FieldByName(field)
 	if !cur.IsValid() {
 		return false
 	}
@@ -106,8 +194,7 @@ func checkConfirmed(rv reflect.Value, field string) bool {
 	return reflect.DeepEqual(cur.Interface(), conf.Interface())
 }
 
-// checkRule applies a single rule string ("required", "max:255", "unique:users,email")
-// to a reflect.Value and returns whether it passes.
+// checkRule applies a single rule string to a reflect.Value.
 func checkRule(v *validator.Validate, field string, fv reflect.Value, rule string) bool {
 	name, param := splitRule(rule)
 
@@ -130,7 +217,6 @@ func checkRule(v *validator.Validate, field string, fv reflect.Value, rule strin
 	return applyRule(name, param, val)
 }
 
-// splitRule parses "name" or "name:param" into two pieces.
 func splitRule(rule string) (name, param string) {
 	if i := strings.Index(rule, ":"); i >= 0 {
 		return rule[:i], rule[i+1:]
@@ -141,12 +227,10 @@ func splitRule(rule string) (name, param string) {
 func ruleName(rule string) string  { n, _ := splitRule(rule); return n }
 func ruleParam(rule string) string { _, p := splitRule(rule); return p }
 
-// Validate is ValidateCtx with a background context.
 func Validate(req any) error {
 	return ValidateCtx(context.Background(), req)
 }
 
-// parseParam splits comma-separated params ("users,email,id" -> ["users","email","id"]).
 func parseParam(p string) []string {
 	if p == "" {
 		return nil
@@ -158,7 +242,6 @@ func parseParam(p string) []string {
 	return parts
 }
 
-// paramFloat parses a numeric rule param.
 func paramFloat(p string, fallback float64) float64 {
 	f, err := strconv.ParseFloat(p, 64)
 	if err != nil {

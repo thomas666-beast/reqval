@@ -6,9 +6,15 @@ func BindGin(c *gin.Context, dst any) error {
 	return BindCtx(c.Request.Context(), c.Request.Body, dst)
 }
 
-// AbortWithError writes the appropriate status and body.
-// This is opt-in. The controller may instead inspect the error
-// and choose its own response shape (JSON, flash, redirect).
+func BindMultipartGin(c *gin.Context, dst any) error {
+	return BindMultipartCtx(c.Request.Context(), c.Request, dst)
+}
+
+// BindFormGin parses application/x-www-form-urlencoded and validates.
+func BindFormGin(c *gin.Context, dst any) error {
+	return BindFormCtx(c.Request.Context(), c.Request, dst)
+}
+
 func AbortWithError(c *gin.Context, err error) {
 	if ae, ok := AsAuthorizationError(err); ok {
 		c.AbortWithStatusJSON(ae.HTTPStatus(), gin.H{"error": ae.Message})

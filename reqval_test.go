@@ -1,9 +1,14 @@
 package reqval
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -33,8 +38,6 @@ func newTestDB(t *testing.T) *sql.DB {
 	return db
 }
 
-// --- basic request ---
-
 type storePostRequest struct {
 	Base
 	Title      string `json:"title"`
@@ -51,15 +54,12 @@ func (r *storePostRequest) Rules() map[string][]string {
 }
 
 func (r *storePostRequest) Messages() map[string]string {
-	return map[string]string{
-		"Title.required": "We need a title.",
-	}
+	return map[string]string{"Title.required": "We need a title."}
 }
 
 func TestValidPasses(t *testing.T) {
 	RegisterDB(newTestDB(t))
-	req := &storePostRequest{Title: "Hi", Body: "This is long enough", CategoryID: 1}
-	if err := ValidateCtx(context.Background(), req); err != nil {
+	if err := ValidateCtx(context.Background(), &storePostRequest{Title: "Hi", Body: "This is long enough", CategoryID: 1}); err != nil {
 		t.Fatalf("want valid, got %v", err)
 	}
 }
@@ -84,8 +84,6 @@ func TestExistsFails(t *testing.T) {
 	}
 }
 
-// --- authorization runs before decode ---
-
 type authFailReq struct{ Base }
 
 func (r *authFailReq) Rules() map[string][]string          { return nil }
@@ -98,8 +96,6 @@ func TestAuthorizeRunsBeforeDecode(t *testing.T) {
 		t.Fatalf("want 403 before decode, got %v", err)
 	}
 }
-
-// --- unique (create) ---
 
 type userReq struct {
 	Base
@@ -120,8 +116,6 @@ func TestUniqueCreate(t *testing.T) {
 	}
 }
 
-// --- unique (update, with ignore) ---
-
 type updateReq struct {
 	Base
 	Username string `json:"username"`
@@ -138,8 +132,6 @@ func TestUniqueUpdateIgnore(t *testing.T) {
 	}
 }
 
-// --- applyRule primitives ---
-
 func TestInAndBetween(t *testing.T) {
 	if !applyRule("in", "admin,editor", "admin") {
 		t.Fatal("in should accept admin")
@@ -154,8 +146,6 @@ func TestInAndBetween(t *testing.T) {
 		t.Fatal("between should reject 200")
 	}
 }
-
-// --- message resolution order ---
 
 type plainReq struct {
 	Base
@@ -179,8 +169,6 @@ func (r *overrideReq) Messages() map[string]string {
 }
 
 func TestMessageResolutionOrder(t *testing.T) {
-	RegisterDB(newTestDB(t))
-
 	SetDefaultMessages(nil)
 	err := ValidateCtx(context.Background(), &plainReq{})
 	ve, ok := AsValidationError(err)
@@ -206,12 +194,10 @@ func TestMessageResolutionOrder(t *testing.T) {
 	}
 }
 
-// --- confirmed (cross-field) ---
-
 type confirmedReq struct {
 	Base
-	Password             string `json:"password"`
-	PasswordConfirmation string `json:"password_confirmation"`
+	Password             string
+	PasswordConfirmation string
 }
 
 func (r *confirmedReq) Rules() map[string][]string {
@@ -219,15 +205,13 @@ func (r *confirmedReq) Rules() map[string][]string {
 }
 
 func TestConfirmedMatching(t *testing.T) {
-	ok := &confirmedReq{Password: "hunter2", PasswordConfirmation: "hunter2"}
-	if err := ValidateCtx(context.Background(), ok); err != nil {
+	if err := ValidateCtx(context.Background(), &confirmedReq{Password: "hunter2", PasswordConfirmation: "hunter2"}); err != nil {
 		t.Fatalf("want pass, got %v", err)
 	}
 }
 
 func TestConfirmedMismatch(t *testing.T) {
-	bad := &confirmedReq{Password: "hunter2", PasswordConfirmation: "different"}
-	err := ValidateCtx(context.Background(), bad)
+	err := ValidateCtx(context.Background(), &confirmedReq{Password: "hunter2", PasswordConfirmation: "different"})
 	ve, ok := AsValidationError(err)
 	if !ok {
 		t.Fatalf("want validation error, got %v", err)
@@ -237,20 +221,9 @@ func TestConfirmedMismatch(t *testing.T) {
 	}
 }
 
-func TestConfirmedMissingSibling(t *testing.T) {
-	type missing struct {
-		Base
-		Password string
-	}
-	r := &missing{Password: "x"}
-	_ = r
-}
-
-// --- date ---
-
 type dateReq struct {
 	Base
-	PublishedAt string `json:"published_at"`
+	PublishedAt string
 }
 
 func (r *dateReq) Rules() map[string][]string {
@@ -270,12 +243,215 @@ func TestDateInvalid(t *testing.T) {
 	}
 }
 
-func TestDateEmptyAllowed(t *testing.T) {
-	// no required, empty should pass
-	type optional struct {
-		Base
-		PublishedAt string
+type uploadReq struct {
+	Base
+	Description string `form:"description"`
+}
+
+func (r *uploadReq) Rules() map[string][]string {
+	return map[string][]string{"Description": {"required", "max:200"}}
+}
+
+func (r *uploadReq) FileRules() []FileRule {
+	return []FileRule{
+		{Field: "avatar", MaxBytes: 2 << 20, MIMEs: []string{"image/png", "image/jpeg"}},
 	}
-	r := &optional{}
-	_ = r
+}
+
+func TestUploadValidPNG(t *testing.T) {
+	body, ctype := buildMultipart(t, "my avatar", "avatar.png", []byte{
+		0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A,
+		0, 0, 0, 0, 0, 0, 0, 0,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/upload", body)
+	req.Header.Set("Content-Type", ctype)
+
+	var dst uploadReq
+	if err := BindMultipartCtx(context.Background(), req, &dst); err != nil {
+		t.Fatalf("want valid upload, got %v", err)
+	}
+	if dst.Description != "my avatar" {
+		t.Fatalf("want description decoded, got %q", dst.Description)
+	}
+}
+
+func TestUploadWrongMIME(t *testing.T) {
+	body, ctype := buildMultipart(t, "my avatar", "avatar.txt", []byte("plain text"))
+	req := httptest.NewRequest(http.MethodPost, "/upload", body)
+	req.Header.Set("Content-Type", ctype)
+
+	var dst uploadReq
+	err := BindMultipartCtx(context.Background(), req, &dst)
+	ve, ok := AsValidationError(err)
+	if !ok {
+		t.Fatalf("want validation error, got %v", err)
+	}
+	if _, has := ve.Fields["avatar"]; !has {
+		t.Fatalf("want avatar flagged, got %v", ve.Fields)
+	}
+}
+
+func TestUploadMissingFile(t *testing.T) {
+	body, ctype := buildMultipart(t, "my avatar", "", nil)
+	req := httptest.NewRequest(http.MethodPost, "/upload", body)
+	req.Header.Set("Content-Type", ctype)
+
+	var dst uploadReq
+	err := BindMultipartCtx(context.Background(), req, &dst)
+	if _, ok := AsValidationError(err); !ok {
+		t.Fatalf("want validation error for missing file, got %v", err)
+	}
+}
+
+func buildMultipart(t *testing.T, desc, filename string, content []byte) (*bytes.Buffer, string) {
+	t.Helper()
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	if desc != "" {
+		_ = w.WriteField("description", desc)
+	}
+	if filename != "" {
+		fw, err := w.CreateFormFile("avatar", filename)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fw.Write(content)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return &buf, w.FormDataContentType()
+}
+
+type Item struct {
+	Name     string `json:"name"`
+	Quantity int    `json:"quantity"`
+}
+
+type orderReq struct {
+	Base
+	Items []Item `json:"items"`
+}
+
+func (r *orderReq) Rules() map[string][]string {
+	return map[string][]string{
+		"Items.*.Name":     {"required", "max:50"},
+		"Items.*.Quantity": {"required", "gte:1"},
+	}
+}
+
+func TestNestedValid(t *testing.T) {
+	r := &orderReq{Items: []Item{
+		{Name: "widget", Quantity: 2},
+		{Name: "gadget", Quantity: 1},
+	}}
+	if err := ValidateCtx(context.Background(), r); err != nil {
+		t.Fatalf("want valid, got %v", err)
+	}
+}
+
+func TestNestedOneFails(t *testing.T) {
+	r := &orderReq{Items: []Item{
+		{Name: "widget", Quantity: 2},
+		{Name: "", Quantity: 1},
+	}}
+	err := ValidateCtx(context.Background(), r)
+	ve, ok := AsValidationError(err)
+	if !ok {
+		t.Fatalf("want validation error, got %v", err)
+	}
+	if _, has := ve.Fields["Items.1.Name"]; !has {
+		t.Fatalf("want Items.1.Name flagged, got %v", ve.Fields)
+	}
+}
+
+func TestNestedMultipleErrors(t *testing.T) {
+	r := &orderReq{Items: []Item{
+		{Name: "", Quantity: 0},
+		{Name: "widget", Quantity: -1},
+	}}
+	err := ValidateCtx(context.Background(), r)
+	ve, ok := AsValidationError(err)
+	if !ok {
+		t.Fatalf("want validation error, got %v", err)
+	}
+	if _, has := ve.Fields["Items.0.Name"]; !has {
+		t.Fatalf("want Items.0.Name flagged, got %v", ve.Fields)
+	}
+	if _, has := ve.Fields["Items.0.Quantity"]; !has {
+		t.Fatalf("want Items.0.Quantity flagged, got %v", ve.Fields)
+	}
+	if _, has := ve.Fields["Items.1.Quantity"]; !has {
+		t.Fatalf("want Items.1.Quantity flagged, got %v", ve.Fields)
+	}
+}
+
+// --- form binding ---
+
+type loginReq struct {
+	Base
+	Email    string   `form:"email"`
+	Password string   `form:"password"`
+	Roles    []string `form:"roles"`
+}
+
+func (r *loginReq) Rules() map[string][]string {
+	return map[string][]string{
+		"Email":    {"required", "email"},
+		"Password": {"required", "min:8"},
+		"Roles":    {"required", "min:1"},
+	}
+}
+
+func TestFormValid(t *testing.T) {
+	form := url.Values{
+		"email":    {"a@b.com"},
+		"password": {"hunter2hunter"},
+		"roles":    {"admin", "editor"},
+	}
+	body := strings.NewReader(form.Encode())
+	req := httptest.NewRequest(http.MethodPost, "/login", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	var dst loginReq
+	if err := BindFormCtx(context.Background(), req, &dst); err != nil {
+		t.Fatalf("want valid form, got %v", err)
+	}
+	if dst.Email != "a@b.com" {
+		t.Fatalf("want email decoded, got %q", dst.Email)
+	}
+	if len(dst.Roles) != 2 || dst.Roles[0] != "admin" {
+		t.Fatalf("want roles decoded, got %v", dst.Roles)
+	}
+}
+
+func TestFormInvalid(t *testing.T) {
+	form := url.Values{
+		"email":    {"nope"},
+		"password": {"x"},
+	}
+	body := strings.NewReader(form.Encode())
+	req := httptest.NewRequest(http.MethodPost, "/login", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	var dst loginReq
+	err := BindFormCtx(context.Background(), req, &dst)
+	ve, ok := AsValidationError(err)
+	if !ok {
+		t.Fatalf("want validation error, got %v", err)
+	}
+	for _, f := range []string{"Email", "Password", "Roles"} {
+		if _, has := ve.Fields[f]; !has {
+			t.Fatalf("want %s flagged, got %v", f, ve.Fields)
+		}
+	}
+}
+
+func TestFormWrongContentType(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	var dst loginReq
+	if err := BindFormCtx(context.Background(), req, &dst); err == nil {
+		t.Fatal("want error for wrong content type, got nil")
+	}
 }

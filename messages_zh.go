@@ -3,8 +3,8 @@ package reqval
 func ZH() map[string]string {
 	return map[string]string{
 		"*.required":  "{{field}} 字段是必填的。",
-		"*.min":       "{{field}} 字段至少需要 {{param}} 个字符。",
-		"*.max":       "{{field}} 字段不能超过 {{param}} 个字符。",
+		"*.min":       "{{field}} 字段至少需要 {{param}}。",
+		"*.max":       "{{field}} 字段不能超过 {{param}}。",
 		"*.email":     "{{field}} 必须是有效的邮箱地址。",
 		"*.url":       "{{field}} 必须是有效的 URL。",
 		"*.uuid":      "{{field}} 必须是有效的 UUID。",
@@ -21,5 +21,6 @@ func ZH() map[string]string {
 		"*.confirmed": "{{field}} 确认不匹配。",
 		"*.unique":    "{{field}} 已被占用。",
 		"*.exists":    "所选 {{field}} 无效。",
+		"*.mimes":     "{{field}} 必须是以下类型之一：{{param}}。",
 	}
 }

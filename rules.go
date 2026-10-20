@@ -13,7 +13,6 @@ import (
 )
 
 // registerCustomRules is a no-op in the method-based design.
-// Rules are dispatched through applyRule, not through validator's tag engine.
 func registerCustomRules(v *validator.Validate) {
 	_ = v
 }
@@ -86,19 +85,18 @@ func applyRule(name, param string, val any) bool {
 		if !ok {
 			return false
 		}
-		// Empty values skip; pair with "required" to enforce presence.
 		if s == "" {
 			return true
 		}
 		layout := param
 		if layout == "" {
-			layout = "2006-01-02" // ISO date default
+			layout = "2006-01-02"
 		}
 		_, err := time.Parse(layout, s)
 		return err == nil
 
 	case "confirmed":
-		return true // handled at struct level in ValidateCtx
+		return true
 
 	case "unique":
 		return checkUnique(context.Background(), param, val)
@@ -111,8 +109,6 @@ func applyRule(name, param string, val any) bool {
 	}
 }
 
-// --- string pattern regexps ---
-
 var (
 	emailRe    = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
 	urlRe      = regexp.MustCompile(`^https?://[^\s]+$`)
@@ -122,8 +118,6 @@ var (
 	alphanumRe = regexp.MustCompile(`^[a-zA-Z0-9]+$`)
 	identRe    = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 )
-
-// --- helpers ---
 
 func isEmpty(v any) bool {
 	switch x := v.(type) {
@@ -156,13 +150,28 @@ func isEmpty(v any) bool {
 	case bool:
 		return !x
 	default:
-		return reflect.ValueOf(v).IsZero()
+		rv := reflect.ValueOf(v)
+		switch rv.Kind() {
+		case reflect.Slice, reflect.Map, reflect.Array:
+			return rv.Len() == 0
+		}
+		return rv.IsZero()
 	}
 }
 
+// cmpLen returns the "length" used by min/max:
+//   - len() for strings
+//   - Len() for slices, arrays, maps
+//   - numeric value for numbers
 func cmpLen(v any) int {
-	if s, ok := v.(string); ok {
-		return len(s)
+	switch x := v.(type) {
+	case string:
+		return len(x)
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Slice, reflect.Array, reflect.Map:
+		return rv.Len()
 	}
 	return int(toFloat(v))
 }
