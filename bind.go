@@ -17,6 +17,7 @@ func BindCtx(ctx context.Context, r io.Reader, dst any) error {
 	if err := runAuthorizer(ctx, dst); err != nil {
 		return err
 	}
+
 	body, err := io.ReadAll(r)
 	if err != nil {
 		return err

@@ -1,6 +1,8 @@
 package reqval
 
 import (
+	"context"
+	"fmt"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -9,137 +11,187 @@ import (
 	"github.com/go-playground/validator/v10"
 )
 
-// registerRules wires library-owned custom rules onto v.
-// It must NOT call engine(); the caller owns the Once and passes v in.
-//
-// IMPORTANT: tag params can never contain commas — the tag parser splits
-// on ',' before the rule is dispatched, so no custom validator ever sees a
-// comma in fl.Param(). Multi-value rules therefore accept space or colon
-// as the internal separator.
-func registerRules(v *validator.Validate) {
-	_ = v.RegisterValidation("confirmed", validateConfirmed)
-	_ = v.RegisterValidation("in", validateIn)
-	_ = v.RegisterValidation("between", validateBetween)
-	_ = v.RegisterValidation("regexp", validateRegexp)
+// registerCustomRules is a no-op in the method-based design.
+// Rules are dispatched through applyRule, not through validator's tag engine.
+func registerCustomRules(v *validator.Validate) {
+	_ = v
 }
 
-// validateConfirmed compares the field to a confirmation field.
-// It looks for "<Field>Confirmation" first (Go-idiomatic camelCase),
-// then "<field>_confirmation" (Laravel snake_case convention).
-func validateConfirmed(fl validator.FieldLevel) bool {
-	parent := fl.Parent()
-	fieldName := fl.StructFieldName()
+// applyRule dispatches a single rule check.
+func applyRule(name, param string, val any) bool {
+	switch name {
+	// --- built-in ---
+	case "required":
+		return !isEmpty(val)
+	case "min":
+		return cmpLen(val) >= int(paramFloat(param, 0))
+	case "max":
+		return cmpLen(val) <= int(paramFloat(param, 0))
+	case "email":
+		s, _ := val.(string)
+		return emailRe.MatchString(s)
+	case "url":
+		s, _ := val.(string)
+		return urlRe.MatchString(s)
+	case "uuid":
+		s, _ := val.(string)
+		return uuidRe.MatchString(s)
+	case "numeric":
+		s, _ := val.(string)
+		return numericRe.MatchString(s)
+	case "alpha":
+		s, _ := val.(string)
+		return alphaRe.MatchString(s)
+	case "alphanum":
+		s, _ := val.(string)
+		return alphanumRe.MatchString(s)
+	case "gte":
+		return toFloat(val) >= paramFloat(param, 0)
+	case "lte":
+		return toFloat(val) <= paramFloat(param, 0)
+	case "in":
+		return inList(val, param)
+	case "oneof":
+		return inList(val, strings.ReplaceAll(param, ",", " "))
 
-	conf := parent.FieldByName(fieldName + "Confirmation") // PasswordConfirmation
-	if !conf.IsValid() {
-		conf = parent.FieldByName(fieldName + "_confirmation") // password_confirmation
+	// --- reqval custom ---
+	case "between":
+		parts := parseParam(param)
+		if len(parts) != 2 {
+			return false
+		}
+		lo := paramFloat(parts[0], 0)
+		hi := paramFloat(parts[1], 0)
+		if s, ok := val.(string); ok {
+			n := float64(len(s))
+			return n >= lo && n <= hi
+		}
+		n := toFloat(val)
+		return n >= lo && n <= hi
+
+	case "regexp":
+		s, ok := val.(string)
+		if !ok {
+			return false
+		}
+		re, err := regexp.Compile(param)
+		if err != nil {
+			return false
+		}
+		return re.MatchString(s)
+
+	case "confirmed":
+		return true // handled at struct level in ValidateCtx
+
+	case "unique":
+		return checkUnique(context.Background(), param, val)
+
+	case "exists":
+		return checkExists(context.Background(), param, val)
+
+	default:
+		return true
 	}
-	if !conf.IsValid() {
-		return false
-	}
-	if fl.Field().Kind() != conf.Kind() {
-		return false
-	}
-	return reflect.DeepEqual(fl.Field().Interface(), conf.Interface())
 }
 
-// validateIn accepts space- or colon-separated values.
-//
-//	validate:"in=admin editor"
-//	validate:"in=admin:editor"
-func validateIn(fl validator.FieldLevel) bool {
-	values := splitList(fl.Param())
-	field := fl.Field()
-	for _, v := range values {
-		if valuesEqual(field, v) {
+// --- string pattern regexps ---
+
+var (
+	emailRe    = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
+	urlRe      = regexp.MustCompile(`^https?://[^\s]+$`)
+	uuidRe     = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+	numericRe  = regexp.MustCompile(`^[0-9]+$`)
+	alphaRe    = regexp.MustCompile(`^[a-zA-Z]+$`)
+	alphanumRe = regexp.MustCompile(`^[a-zA-Z0-9]+$`)
+	identRe    = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+)
+
+// --- helpers ---
+
+func isEmpty(v any) bool {
+	switch x := v.(type) {
+	case string:
+		return x == ""
+	case int:
+		return x == 0
+	case int8:
+		return x == 0
+	case int16:
+		return x == 0
+	case int32:
+		return x == 0
+	case int64:
+		return x == 0
+	case uint:
+		return x == 0
+	case uint8:
+		return x == 0
+	case uint16:
+		return x == 0
+	case uint32:
+		return x == 0
+	case uint64:
+		return x == 0
+	case float32:
+		return x == 0
+	case float64:
+		return x == 0
+	case bool:
+		return !x
+	default:
+		return reflect.ValueOf(v).IsZero()
+	}
+}
+
+func cmpLen(v any) int {
+	if s, ok := v.(string); ok {
+		return len(s)
+	}
+	return int(toFloat(v))
+}
+
+func toFloat(v any) float64 {
+	switch x := v.(type) {
+	case int:
+		return float64(x)
+	case int8:
+		return float64(x)
+	case int16:
+		return float64(x)
+	case int32:
+		return float64(x)
+	case int64:
+		return float64(x)
+	case uint:
+		return float64(x)
+	case uint8:
+		return float64(x)
+	case uint16:
+		return float64(x)
+	case uint32:
+		return float64(x)
+	case uint64:
+		return float64(x)
+	case float32:
+		return float64(x)
+	case float64:
+		return x
+	case string:
+		f, _ := strconv.ParseFloat(x, 64)
+		return f
+	default:
+		return 0
+	}
+}
+
+func inList(val any, param string) bool {
+	items := strings.FieldsFunc(param, func(r rune) bool {
+		return r == ',' || r == ' ' || r == ':'
+	})
+	for _, it := range items {
+		if it == fmt.Sprint(val) {
 			return true
 		}
 	}
 	return false
-}
-
-// validateBetween handles ints, uints, floats, and strings (length).
-//
-//	validate:"between=1 100"      // numeric range
-//	validate:"between=1:100"      // numeric range (colon form)
-//	validate:"between=3 10"       // string length range
-func validateBetween(fl validator.FieldLevel) bool {
-	params := splitList(fl.Param())
-	if len(params) != 2 {
-		return false
-	}
-	lo, err1 := strconv.ParseFloat(params[0], 64)
-	hi, err2 := strconv.ParseFloat(params[1], 64)
-	if err1 != nil || err2 != nil {
-		return false
-	}
-
-	field := fl.Field()
-	switch field.Kind() {
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		v := float64(field.Int())
-		return v >= lo && v <= hi
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		v := float64(field.Uint())
-		return v >= lo && v <= hi
-	case reflect.Float32, reflect.Float64:
-		v := field.Float()
-		return v >= lo && v <= hi
-	case reflect.String:
-		n := float64(len(field.String()))
-		return n >= lo && n <= hi
-	default:
-		return false
-	}
-}
-
-// validateRegexp compiles the param as a Go regexp and matches the field.
-// Only valid for string fields.
-func validateRegexp(fl validator.FieldLevel) bool {
-	if fl.Field().Kind() != reflect.String {
-		return false
-	}
-	pattern := fl.Param()
-	if pattern == "" {
-		return false
-	}
-	re, err := regexp.Compile(pattern)
-	if err != nil {
-		return false
-	}
-	return re.MatchString(fl.Field().String())
-}
-
-// splitList splits a param on spaces or colons (never commas).
-func splitList(param string) []string {
-	fields := strings.FieldsFunc(param, func(r rune) bool {
-		return r == ':' || r == ' '
-	})
-	out := make([]string, 0, len(fields))
-	for _, f := range fields {
-		f = strings.TrimSpace(f)
-		if f != "" {
-			out = append(out, f)
-		}
-	}
-	return out
-}
-
-// valuesEqual compares a reflect.Value against a string literal.
-func valuesEqual(v reflect.Value, want string) bool {
-	switch v.Kind() {
-	case reflect.String:
-		return v.String() == want
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		n, err := strconv.ParseInt(want, 10, 64)
-		return err == nil && v.Int() == n
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		n, err := strconv.ParseUint(want, 10, 64)
-		return err == nil && v.Uint() == n
-	case reflect.Float32, reflect.Float64:
-		n, err := strconv.ParseFloat(want, 64)
-		return err == nil && v.Float() == n
-	default:
-		return false
-	}
 }

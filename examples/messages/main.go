@@ -9,33 +9,52 @@ import (
 type StorePostRequest struct {
 	reqval.Base
 
-	Title string `validate:"required,max=255"`
-	Body  string `validate:"required,min=10"`
+	Title string `json:"title"`
+	Body  string `json:"body"`
 }
 
-func show(label string, req *StorePostRequest) {
-	err := reqval.Validate(req)
-	if ve, ok := reqval.AsValidationError(err); ok {
-		fmt.Printf("%s:\n", label)
-		for _, k := range []string{"Title", "Body"} {
-			if m, ok := ve.Fields[k]; ok {
-				fmt.Printf("  %s -> %s\n", k, m)
-			}
-		}
+func (r *StorePostRequest) Rules() map[string][]string {
+	return map[string][]string{
+		"Title": {"required", "max:255"},
+		"Body":  {"required", "min:10"},
+	}
+}
+
+func (r *StorePostRequest) Messages() map[string]string {
+	return map[string]string{
+		"Title.required": "We really need a title.",
+		"Body.min":       "The body must be at least {{param}} characters.",
+	}
+}
+
+type PlainRequest struct {
+	reqval.Base
+
+	Name string `json:"name"`
+}
+
+func (r *PlainRequest) Rules() map[string][]string {
+	return map[string][]string{
+		"Name": {"required"},
 	}
 }
 
 func main() {
-	bad := &StorePostRequest{}
+	show("fallback (no bundle)", &PlainRequest{})
+	reqval.SetDefaultMessages(reqval.ZH())
+	show("app bundle (ZH)", &PlainRequest{})
+	show("request override wins", &StorePostRequest{})
+}
 
-	show("1) default EN", bad)
-
-	reqval.RegisterMessage("required", "Please fill in {{field}}.")
-	show("2) tag override", bad)
-
-	reqval.RegisterFieldMessage("StorePostRequest", "Title", "We really need a title.")
-	show("3) field override (Title)", bad)
-
-	reqval.LoadZH()
-	show("4) ZH bundle (Title override still wins)", bad)
+func show(label string, req reqval.Request) {
+	err := reqval.Validate(req)
+	if err == nil {
+		fmt.Printf("%-25s OK\n", label)
+		return
+	}
+	if ve, ok := reqval.AsValidationError(err); ok {
+		fmt.Printf("%-25s 422 %v\n", label, ve.Fields)
+		return
+	}
+	fmt.Printf("%-25s err %v\n", label, err)
 }

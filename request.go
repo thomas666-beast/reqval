@@ -1,14 +1,21 @@
 package reqval
 
-// Request is the marker interface every request struct must satisfy.
-// In Stage 1 it's empty on purpose; later stages will use it to hook
-// in authorization, custom messages, and framework adapters.
+import "context"
+
+// Request is implemented by every request type.
+// Rules and Messages are the per-form configuration;
+// Authorize is the pre-validation access check.
 type Request interface {
-	isRequest()
+	Rules() map[string][]string
+	Messages() map[string]string
+	Authorize(ctx context.Context) error
 }
 
-// Base is meant to be embedded in every concrete request struct.
-// Embedding it satisfies the Request interface automatically.
+// Base is embedded by request structs that only need defaults.
+// It provides empty Rules/Messages/Authorize so a struct can be
+// written incrementally.
 type Base struct{}
 
-func (Base) isRequest() {}
+func (Base) Rules() map[string][]string         { return nil }
+func (Base) Messages() map[string]string         { return nil }
+func (Base) Authorize(ctx context.Context) error { return nil }

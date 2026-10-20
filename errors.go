@@ -3,9 +3,6 @@ package reqval
 import (
 	"errors"
 	"fmt"
-	"strings"
-
-	"github.com/go-playground/validator/v10"
 )
 
 type ValidationError struct {
@@ -19,9 +16,7 @@ func (e *ValidationError) Error() string {
 	return fmt.Sprintf("validation failed on %d field(s)", len(e.Fields))
 }
 
-func (e *ValidationError) HTTPStatus() int {
-	return 422
-}
+func (e *ValidationError) HTTPStatus() int { return 422 }
 
 func AsValidationError(err error) (*ValidationError, bool) {
 	var ve *ValidationError
@@ -31,25 +26,23 @@ func AsValidationError(err error) (*ValidationError, bool) {
 	return nil, false
 }
 
-func translate(err error) *ValidationError {
-	var vErrs validator.ValidationErrors
-	if !errors.As(err, &vErrs) {
-		return &ValidationError{Fields: map[string]string{"_error": err.Error()}}
-	}
-
-	fields := make(map[string]string, len(vErrs))
-	for _, fe := range vErrs {
-		fields[fe.Field()] = resolve(structNameFrom(fe), fe)
-	}
-	return &ValidationError{Fields: fields}
+type AuthorizationError struct {
+	Message string
 }
 
-// structNameFrom returns the parent struct name from StructNamespace().
-// e.g. "StorePostRequest.Title" -> "StorePostRequest".
-func structNameFrom(fe validator.FieldError) string {
-	ns := fe.StructNamespace()
-	if i := strings.Index(ns, "."); i > 0 {
-		return ns[:i]
+func (e *AuthorizationError) Error() string {
+	if e.Message == "" {
+		return "forbidden"
 	}
-	return ns
+	return e.Message
+}
+
+func (e *AuthorizationError) HTTPStatus() int { return 403 }
+
+func AsAuthorizationError(err error) (*AuthorizationError, bool) {
+	var ae *AuthorizationError
+	if errors.As(err, &ae) {
+		return ae, true
+	}
+	return nil, false
 }
