@@ -1,7 +1,5 @@
 package reqval
 
-// ZH returns a Chinese translation bundle suitable for SetDefaultMessages
-// or for merging into a request's Messages().
 func ZH() map[string]string {
 	return map[string]string{
 		"*.required":  "{{field}} 字段是必填的。",
@@ -19,6 +17,7 @@ func ZH() map[string]string {
 		"*.oneof":     "所选 {{field}} 无效。",
 		"*.between":   "{{field}} 必须在 {{param}} 之间。",
 		"*.regexp":    "{{field}} 格式无效。",
+		"*.date":      "{{field}} 必须是有效的日期。",
 		"*.confirmed": "{{field}} 确认不匹配。",
 		"*.unique":    "{{field}} 已被占用。",
 		"*.exists":    "所选 {{field}} 无效。",

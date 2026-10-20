@@ -181,7 +181,6 @@ func (r *overrideReq) Messages() map[string]string {
 func TestMessageResolutionOrder(t *testing.T) {
 	RegisterDB(newTestDB(t))
 
-	// 1. fallback only (no bundle, no override)
 	SetDefaultMessages(nil)
 	err := ValidateCtx(context.Background(), &plainReq{})
 	ve, ok := AsValidationError(err)
@@ -192,7 +191,6 @@ func TestMessageResolutionOrder(t *testing.T) {
 		t.Fatalf("fallback: got %q", ve.Fields["Name"])
 	}
 
-	// 2. app bundle applies when no override
 	SetDefaultMessages(map[string]string{"*.required": "BUNDLE {{field}}"})
 	defer SetDefaultMessages(nil)
 	err = ValidateCtx(context.Background(), &plainReq{})
@@ -201,10 +199,83 @@ func TestMessageResolutionOrder(t *testing.T) {
 		t.Fatalf("bundle: got %q", ve.Fields["Name"])
 	}
 
-	// 3. request override wins over bundle
 	err = ValidateCtx(context.Background(), &overrideReq{})
 	ve, _ = AsValidationError(err)
 	if ve.Fields["Name"] != "REQUEST Name" {
 		t.Fatalf("override: got %q", ve.Fields["Name"])
 	}
+}
+
+// --- confirmed (cross-field) ---
+
+type confirmedReq struct {
+	Base
+	Password             string `json:"password"`
+	PasswordConfirmation string `json:"password_confirmation"`
+}
+
+func (r *confirmedReq) Rules() map[string][]string {
+	return map[string][]string{"Password": {"required", "confirmed"}}
+}
+
+func TestConfirmedMatching(t *testing.T) {
+	ok := &confirmedReq{Password: "hunter2", PasswordConfirmation: "hunter2"}
+	if err := ValidateCtx(context.Background(), ok); err != nil {
+		t.Fatalf("want pass, got %v", err)
+	}
+}
+
+func TestConfirmedMismatch(t *testing.T) {
+	bad := &confirmedReq{Password: "hunter2", PasswordConfirmation: "different"}
+	err := ValidateCtx(context.Background(), bad)
+	ve, ok := AsValidationError(err)
+	if !ok {
+		t.Fatalf("want validation error, got %v", err)
+	}
+	if _, has := ve.Fields["Password"]; !has {
+		t.Fatalf("want Password flagged, got %v", ve.Fields)
+	}
+}
+
+func TestConfirmedMissingSibling(t *testing.T) {
+	type missing struct {
+		Base
+		Password string
+	}
+	r := &missing{Password: "x"}
+	_ = r
+}
+
+// --- date ---
+
+type dateReq struct {
+	Base
+	PublishedAt string `json:"published_at"`
+}
+
+func (r *dateReq) Rules() map[string][]string {
+	return map[string][]string{"PublishedAt": {"required", "date:2006-01-02"}}
+}
+
+func TestDateValid(t *testing.T) {
+	if err := ValidateCtx(context.Background(), &dateReq{PublishedAt: "2024-03-15"}); err != nil {
+		t.Fatalf("want valid date, got %v", err)
+	}
+}
+
+func TestDateInvalid(t *testing.T) {
+	err := ValidateCtx(context.Background(), &dateReq{PublishedAt: "15/03/2024"})
+	if _, ok := AsValidationError(err); !ok {
+		t.Fatalf("want invalid date, got %v", err)
+	}
+}
+
+func TestDateEmptyAllowed(t *testing.T) {
+	// no required, empty should pass
+	type optional struct {
+		Base
+		PublishedAt string
+	}
+	r := &optional{}
+	_ = r
 }

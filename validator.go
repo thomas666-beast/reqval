@@ -57,9 +57,21 @@ func ValidateCtx(ctx context.Context, req any) error {
 			continue
 		}
 		for _, rule := range fieldRules {
+			name := ruleName(rule)
+			param := ruleParam(rule)
+
+			// confirmed is a cross-field rule: it needs the parent struct.
+			// Handle it here, before dispatch to applyRule.
+			if name == "confirmed" {
+				if !checkConfirmed(rv, field) {
+					fields[field] = messageFor(r, field, name, param)
+					break
+				}
+				continue
+			}
+
 			if !checkRule(v, field, fv, rule) {
-				msg := messageFor(r, field, ruleName(rule), ruleParam(rule))
-				fields[field] = msg
+				fields[field] = messageFor(r, field, name, param)
 				break
 			}
 		}
@@ -69,6 +81,29 @@ func ValidateCtx(ctx context.Context, req any) error {
 		return &ValidationError{Fields: fields}
 	}
 	return nil
+}
+
+// checkConfirmed compares field with <Field>Confirmation, falling back to
+// <field>_confirmation. Returns false if neither exists.
+func checkConfirmed(rv reflect.Value, field string) bool {
+	parent := rv
+
+	conf := parent.FieldByName(field + "Confirmation")
+	if !conf.IsValid() {
+		conf = parent.FieldByName(field + "_confirmation")
+	}
+	if !conf.IsValid() {
+		return false
+	}
+
+	cur := parent.FieldByName(field)
+	if !cur.IsValid() {
+		return false
+	}
+	if cur.Kind() != conf.Kind() {
+		return false
+	}
+	return reflect.DeepEqual(cur.Interface(), conf.Interface())
 }
 
 // checkRule applies a single rule string ("required", "max:255", "unique:users,email")

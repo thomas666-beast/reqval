@@ -10,17 +10,12 @@ var (
 	defaultMessages map[string]string
 )
 
-// SetDefaultMessages installs the application-wide message bundle.
-// Keys are "<field>.<rule>" or "*.<rule>". Call once at startup,
-// usually with a translation bundle such as reqval.ZH().
 func SetDefaultMessages(m map[string]string) {
 	bundleMu.Lock()
 	defer bundleMu.Unlock()
 	defaultMessages = m
 }
 
-// messageFor resolves the message for a field/rule pair.
-// Priority: request's Messages() > application default bundle > fallback.
 func messageFor(r Request, field, rule, param string) string {
 	if r != nil {
 		if m := r.Messages(); m != nil {

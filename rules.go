@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-playground/validator/v10"
 )
@@ -79,6 +80,22 @@ func applyRule(name, param string, val any) bool {
 			return false
 		}
 		return re.MatchString(s)
+
+	case "date":
+		s, ok := val.(string)
+		if !ok {
+			return false
+		}
+		// Empty values skip; pair with "required" to enforce presence.
+		if s == "" {
+			return true
+		}
+		layout := param
+		if layout == "" {
+			layout = "2006-01-02" // ISO date default
+		}
+		_, err := time.Parse(layout, s)
+		return err == nil
 
 	case "confirmed":
 		return true // handled at struct level in ValidateCtx
