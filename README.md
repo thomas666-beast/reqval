@@ -2,7 +2,7 @@
 
 Declarative form validation for [Go](https://go.dev), inspired by Laravel's Form Requests.
 
-Instead of scattering validation rules, error formatting, and authorization checks across handlers, you define one struct per form, one tag per rule, and ask a single question:
+Instead of scattering validation rules, error formatting, and authorization checks across handlers, you define one request type per form. That file contains the rules, the messages, and the authorization. The controller just calls it.
 
 ```go
 if err := reqval.BindGin(c, &req); err != nil {
@@ -18,17 +18,16 @@ If the input is valid, the handler proceeds. If not, the client gets a 422 with 
 - [Why this library](#why-this-library)
 - [Installation](#installation)
 - [Quick start](#quick-start)
-- [Writing request structs](#writing-request-structs)
-- [Using the helpers](#using-the-helpers)
-  - [Bind and BindCtx](#bind-and-bindctx)
-  - [BindGin](#bindgin)
-  - [AbortWithError](#abortwitherror)
-- [Tag reference](#tag-reference)
-- [Custom rules](#custom-rules)
-- [Database rules](#database-rules)
+- [Writing a request](#writing-a-request)
+- [Rules](#rules)
+- [Messages](#messages)
 - [Authorization](#authorization)
+- [Binding](#binding)
 - [Error handling](#error-handling)
-- [Messages and translation](#messages-and-translation)
+- [Database rules](#database-rules)
+- [Examples](#examples)
+- [Testing](#testing)
+- [Differences from Laravel](#differences-from-laravel)
 - [FAQ](#faq)
 - [License](#license)
 
@@ -55,33 +54,38 @@ if len(req.Title) > 255 {
 
 This works until you have five handlers, three resources, and a database uniqueness check. Then the rules drift, some handlers forget a check, and every endpoint returns errors in a slightly different shape.
 
-`reqval` centralizes those rules in one struct:
+`reqval` centralizes those rules in one request file:
 
 ```go
 type StorePostRequest struct {
     reqval.Base
-    Title string `json:"title" validate:"required,max=255"`
-    Slug  string `json:"slug"  validate:"required,unique=posts:slug"`
+    Title string `json:"title"`
+    Body  string `json:"body"`
+}
+
+func (r *StorePostRequest) Rules() map[string][]string {
+    return map[string][]string{
+        "Title": {"required", "max:255"},
+        "Body":  {"required", "min:10"},
+    }
+}
+
+func (r *StorePostRequest) Messages() map[string]string {
+    return map[string]string{
+        "Title.required": "We really need a title.",
+    }
+}
+
+func (r *StorePostRequest) Authorize(ctx context.Context) error {
+    actor, ok := ActorFrom(ctx)
+    if !ok || actor.Role != "admin" {
+        return errors.New("admin only")
+    }
+    return nil
 }
 ```
 
 Now "what makes a valid post?" has one answer, in one file, testable in isolation.
-
-**What this library gives you:**
-
-- One struct per form, one tag per rule
-- A `Bind` family of helpers that decode, authorize, and validate in one call
-- Database-aware `unique` and `exists` rules with SQL injection protection
-- Pre-validation authorization via an `Authorize(ctx) error` method
-- Consistent 403 / 422 / 400 responses
-- Human-readable messages, overridable per tag or per field
-- A Gin adapter, plus a framework-agnostic core
-
-**What it does not do:**
-
-- It does not authenticate users. You provide the actor via context.
-- It does not include roles or permissions. That is your domain logic.
-- It does not render templates. The Gin adapter writes JSON; the core returns errors.
 
 ## Installation
 
@@ -91,7 +95,7 @@ go get github.com/thomas666-beast/reqval
 
 Requires Go 1.22 or newer.
 
-If you use the Gin adapter, also ensure Gin is present:
+If you use the Gin adapter:
 
 ```bash
 go get github.com/gin-gonic/gin
@@ -101,120 +105,45 @@ If you only use the framework-agnostic core (`Bind`, `BindCtx`, `Validate`, `Val
 
 ## Quick start
 
-### Gin
+### The request file
 
 ```go
-package main
+package requests
 
 import (
-    "github.com/gin-gonic/gin"
+    "context"
     "github.com/thomas666-beast/reqval"
 )
 
 type StorePostRequest struct {
     reqval.Base
-    Title string `json:"title" validate:"required,max=255"`
-    Body  string `json:"body"  validate:"required,min=10"`
+    Title string `json:"title"`
+    Body  string `json:"body"`
 }
 
-func main() {
-    r := gin.Default()
-    r.POST("/posts", func(c *gin.Context) {
-        var req StorePostRequest
-        if err := reqval.BindGin(c, &req); err != nil {
-            reqval.AbortWithError(c, err)
-            return
-        }
-        c.JSON(201, gin.H{"title": req.Title})
-    })
-    r.Run()
-}
-```
-
-### net/http
-
-```go
-func CreatePost(w http.ResponseWriter, r *http.Request) {
-    var req StorePostRequest
-    if err := reqval.BindCtx(r.Context(), r.Body, &req); err != nil {
-        if ve, ok := reqval.AsValidationError(err); ok {
-            w.Header().Set("Content-Type", "application/json")
-            w.WriteHeader(422)
-            json.NewEncoder(w).Encode(map[string]any{"errors": ve.Fields})
-            return
-        }
-        http.Error(w, err.Error(), 400)
-        return
+func (r *StorePostRequest) Rules() map[string][]string {
+    return map[string][]string{
+        "Title": {"required", "max:255"},
+        "Body":  {"required", "min:10"},
     }
-    json.NewEncoder(w).Encode(map[string]string{"title": req.Title})
+}
+
+func (r *StorePostRequest) Messages() map[string]string {
+    return map[string]string{
+        "Title.required": "We really need a title.",
+    }
+}
+
+func (r *StorePostRequest) Authorize(ctx context.Context) error {
+    return nil // no auth check for this form
 }
 ```
 
-### Database rules
-
-For `unique` and `exists`, register a database once at startup:
-
-```go
-reqval.RegisterDB(db)
-```
-
-`db` can be `*sql.DB`, `*sql.Tx`, `sqlx.DB`, or anything with a matching `QueryRowContext` method.
-
-## Writing request structs
-
-Every request struct embeds `reqval.Base` and carries two kinds of tags: `json` for decoding, `validate` for rules.
-
-```go
-type StorePostRequest struct {
-    reqval.Base
-
-    Title      string `json:"title"       validate:"required,max=255"`
-    Slug       string `json:"slug"        validate:"required,unique=posts:slug"`
-    CategoryID int64  `json:"category_id" validate:"required,exists=categories:id"`
-}
-```
-
-`reqval.Base` is a marker. It has no fields and no methods you need to call. Its only job is to satisfy the library's internal `Request` interface so the binding functions accept the struct.
-
-Rules are comma-separated. `omitempty` applies to everything after it, so `omitempty,email` means "empty is fine, otherwise must be a valid email."
-
-## Using the helpers
-
-Three functions, each a thin layer around the previous one.
-
-### Bind and BindCtx
-
-```go
-func Bind(r io.Reader, dst any) error
-func BindCtx(ctx context.Context, r io.Reader, dst any) error
-```
-
-Framework-agnostic. `Bind` calls `BindCtx` with a background context, so use `BindCtx` when you need the request's context to reach the authorization hook or the `unique` rule's dynamic ignore ID.
-
-```go
-var req StorePostRequest
-if err := reqval.BindCtx(r.Context(), r.Body, &req); err != nil {
-    // handle
-}
-```
-
-Both functions do three things in order:
-
-1. Call `Authorize(ctx)` if the struct implements `reqval.Authorizer`. Denial → `*AuthorizationError`.
-2. Decode JSON from the reader. Failure → the raw `json.Unmarshal` error.
-3. Validate. Failure → `*ValidationError`.
-
-### BindGin
-
-```go
-func BindGin(c *gin.Context, dst any) error
-```
-
-Same semantics as `BindCtx`, with two Gin-specific conveniences: it reads from `c.Request.Body` and `c.Request.Context()`, so you don't have to thread them in manually.
+### The controller
 
 ```go
 func CreatePost(c *gin.Context) {
-    var req StorePostRequest
+    var req requests.StorePostRequest
     if err := reqval.BindGin(c, &req); err != nil {
         reqval.AbortWithError(c, err)
         return
@@ -223,190 +152,148 @@ func CreatePost(c *gin.Context) {
 }
 ```
 
-### AbortWithError
+The controller never mentions `req.Title == ""` again. That's the point.
+
+## Writing a request
+
+Every request type implements the `reqval.Request` interface:
 
 ```go
-func AbortWithError(c *gin.Context, err error)
-```
-
-Inspects the error type and writes the appropriate status and body, then aborts the Gin context:
-
-| Failure | Status | Body |
-| :--- | :--- | :--- |
-| `*AuthorizationError` | `403` | `{"error": "..."}` |
-| `*ValidationError` | `422` | `{"errors": {"Field": "message"}}` |
-| anything else | `400` | `{"error": "..."}` |
-
-Calling it is optional. If you want a different response shape (e.g., a problem-details format), inspect the error yourself with `AsValidationError` / `AsAuthorizationError` and write whatever you like.
-
-## Tag reference
-
-### Built-in rules
-
-These come from `go-playground/validator` unchanged.
-
-| Tag | Example | Meaning |
-| :--- | :--- | :--- |
-| `required` | `validate:"required"` | Non-zero value |
-| `min` | `validate:"min=3"` | Length or numeric value ≥ 3 |
-| `max` | `validate:"max=255"` | Length or numeric value ≤ 255 |
-| `email` | `validate:"email"` | Valid email address |
-| `url` | `validate:"url"` | Valid URL |
-| `uuid` | `validate:"uuid"` | Valid UUID |
-| `numeric` | `validate:"numeric"` | String contains only digits |
-| `alpha` | `validate:"alpha"` | Only letters |
-| `alphanum` | `validate:"alphanum"` | Only letters and digits |
-| `gte` | `validate:"gte=18"` | Value ≥ 18 |
-| `lte` | `validate:"lte=120"` | Value ≤ 120 |
-| `oneof` | `validate:"oneof=admin editor"` | One of the space-separated values |
-| `omitempty` | `validate:"omitempty,email"` | Skip following rules if the field is empty |
-
-### Rules added by reqval
-
-These do not exist in `go-playground/validator` by default. `reqval` registers them.
-
-| Tag | Example | Meaning |
-| :--- | :--- | :--- |
-| `in` | `validate:"in=admin editor"` | One of space- or colon-separated values |
-| `between` | `validate:"between=1 100"` | Numeric range or string length range |
-| `regexp` | `validate:"regexp=^[A-Z]{3}$"` | Matches a Go regular expression |
-| `confirmed` | `validate:"confirmed"` | Equals `<Field>Confirmation` or `<field>_confirmation` |
-| `unique` | `validate:"unique=users:username"` | Value not already in a database table |
-| `exists` | `validate:"exists=categories:id"` | Value exists in a database table |
-
-## Custom rules
-
-### in
-
-Accepts space- or colon-separated values.
-
-```go
-Role string `validate:"required,in=admin editor viewer"`
-Role string `validate:"required,in=admin:editor:viewer"`
-```
-
-### between
-
-Numeric range for numbers, length range for strings.
-
-```go
-Age   int    `validate:"between=18 120"`
-Score int    `validate:"between=1 100"`
-Name  string `validate:"between=3 10"` // length
-```
-
-### regexp
-
-Matches against a Go regular expression. Non-string fields fail closed.
-
-```go
-Code string `validate:"regexp=^[A-Z]{3}-[0-9]{3}$"`
-```
-
-The name is `regexp`, not `regex`. An unregistered rule name makes `go-playground/validator` panic at first call, so if you see `Undefined validation function`, check the tag name against the table above.
-
-### confirmed
-
-Compares the field with a confirmation field. It tries two naming conventions:
-
-1. `<FieldName>Confirmation` — e.g. `PasswordConfirmation`
-2. `<fieldname>_confirmation` — e.g. `password_confirmation`
-
-```go
-Password             string `validate:"required,min=8,confirmed"`
-PasswordConfirmation string
-```
-
-The confirmation field needs no `validate` tag; it only needs to be exported and named one of the forms above.
-
-## Database rules
-
-### Setup
-
-```go
-reqval.RegisterDB(db)
-```
-
-Registration is safe to call more than once. The most recent database wins. That is deliberate: it lets each test create its own in-memory database without tearing down the library.
-
-### unique
-
-```
-unique=<table>:<column>
-unique=<table>:<column>:<idColumn>
-unique=<table>:<column>:<idColumn>:<ignoreID>
-```
-
-- **2 params** — plain uniqueness: `SELECT COUNT(*) FROM <table> WHERE <column> = ?`
-- **3 params** — dynamic exclusion from context, via `reqval.WithIgnoreID(ctx, id)`. Falls back to plain uniqueness if no ID is in context. Recommended for create + update sharing one struct.
-- **4 params** — hardcoded exclusion: `... WHERE <column> = ? AND <idColumn> <> <ignoreID>`
-
-Update flow using the dynamic form:
-
-```go
-userID := userIDFromSession(c)
-ctx := reqval.WithIgnoreID(c.Request.Context(), userID)
-
-var req UpdateUserRequest
-if err := reqval.BindCtx(ctx, c.Request.Body, &req); err != nil {
-    reqval.AbortWithError(c, err)
-    return
+type Request interface {
+    Rules() map[string][]string
+    Messages() map[string]string
+    Authorize(ctx context.Context) error
 }
 ```
 
-```go
-Username string `validate:"required,unique=users:username:id"`
-```
-
-### exists
-
-```
-exists=<table>:<column>
-```
+Embed `reqval.Base` to satisfy all three with empty defaults, then override what you need:
 
 ```go
-CategoryID int64 `validate:"required,exists=categories:id"`
+type SimpleRequest struct {
+    reqval.Base // Rules/Messages/Authorize all return nil
+    Name        string `json:"name"`
+}
+
+func (r *SimpleRequest) Rules() map[string][]string {
+    return map[string][]string{"Name": {"required"}}
+}
 ```
 
-Zero values skip the check; `required` catches them first. That means a zero-value foreign key produces "CategoryID is required", not "CategoryID is invalid", which is the message you want.
+That is the whole contract. No tags, no config, no magic. The request file is self-contained.
 
-### SQL injection safety
+## Rules
 
-Table and column names are validated against `^[a-zA-Z_][a-zA-Z0-9_]*$` before splicing. Anything containing `;`, quotes, or spaces fails closed. Example: `unique=users;DROP TABLE users:username` is rejected and the table survives.
+`Rules()` returns a map from field name to a slice of rule strings. Each rule is one of:
 
-### Tag parameter rules — read this first
+- A **name** — `"required"`
+- A **name and parameter** — `"max:255"`, `"unique:users,email"`
+- A **name and comma-separated parameters** — `"between:1,100"`, `"unique:users,email,id,42"`
 
-**Comma separates rules in a `validate` tag.** The tag parser splits on comma before dispatching to a rule, so no custom validator ever sees a comma in its parameter. Multi-value rules use space or colon:
+### Built-in rules
+
+| Rule | Example | Meaning |
+| :--- | :--- | :--- |
+| `required` | `"required"` | Non-zero value |
+| `min` | `"min:3"` | Length or numeric value ≥ 3 |
+| `max` | `"max:255"` | Length or numeric value ≤ 255 |
+| `email` | `"email"` | Valid email address |
+| `url` | `"url"` | Valid URL |
+| `uuid` | `"uuid"` | Valid UUID |
+| `numeric` | `"numeric"` | String contains only digits |
+| `alpha` | `"alpha"` | Only letters |
+| `alphanum` | `"alphanum"` | Only letters and digits |
+| `gte` | `"gte:18"` | Value ≥ 18 |
+| `lte` | `"lte:120"` | Value ≤ 120 |
+| `in` | `"in:admin,editor"` | One of comma-separated values |
+| `between` | `"between:1,100"` | Numeric range or string length range |
+| `regexp` | `"regexp:^[A-Z]{3}$"` | Matches a Go regular expression |
+| `confirmed` | `"confirmed"` | Equals `<Field>Confirmation` |
+
+### Database rules
+
+| Rule | Example | Meaning |
+| :--- | :--- | :--- |
+| `unique` | `"unique:users,email"` | Not already in table |
+| `exists` | `"exists:categories,id"` | Exists in table |
+
+See [Database rules](#database-rules) for details.
+
+### Multiple rules
+
+Fields run rules in order and stop at the first failure:
 
 ```go
-Role string `validate:"in=admin editor"`   // correct
-Role string `validate:"in=admin,editor"`   // wrong — "editor" becomes a rule name
-Code string `validate:"between=1 100"`     // correct
-Code string `validate:"between=1,100"`     // wrong
+func (r *StorePostRequest) Rules() map[string][]string {
+    return map[string][]string{
+        "Email": {"required", "email"},
+        "Age":   {"required", "gte:18", "lte:120"},
+    }
+}
 ```
 
-This applies to `in`, `between`, `unique`, `exists`, and every future custom rule.
+## Messages
+
+`Messages()` returns a map from `<field>.<rule>` to a message template. Three priority levels:
+
+1. **Request's `Messages()`** — per form
+2. **Application default bundle** — set with `reqval.SetDefaultMessages(...)`
+3. **Library fallback** — `"The <field> field is invalid."` (used only when 1 and 2 both miss)
+
+### Per-request messages
+
+```go
+func (r *StorePostRequest) Messages() map[string]string {
+    return map[string]string{
+        "Title.required": "We really need a title.",
+        "Body.min":       "The body must be at least {{param}} characters.",
+    }
+}
+```
+
+Placeholders: `{{field}}` (the field name) and `{{param}}` (the rule's parameter).
+
+### Application default bundle
+
+Set once at startup, usually with a translation:
+
+```go
+reqval.SetDefaultMessages(reqval.ZH()) // Chinese defaults for all requests
+```
+
+The `*.rule` form applies a template to every field:
+
+```go
+func (r *StorePostRequest) Messages() map[string]string {
+    return map[string]string{
+        "*.required": "Please fill in {{field}}.",
+    }
+}
+```
+
+### The library contains no rule-specific English
+
+This is deliberate. Translating means calling `reqval.SetDefaultMessages(zhBundle)` or returning a different bundle from `Messages()` — not editing the library. The only string the library itself emits is `"The <field> field is invalid."`, used as a last resort when the user provided nothing.
 
 ## Authorization
 
-Implement `Authorize(ctx) error` on the request struct. Return `nil` to allow, anything else to deny.
+`Authorize(ctx)` runs **before** decoding, so a non-admin with malformed JSON gets 403, not 400. Implement it on the request type:
 
 ```go
 func (r *StorePostRequest) Authorize(ctx context.Context) error {
     actor, ok := ActorFrom(ctx)
     if !ok {
-        return fmt.Errorf("unauthenticated")
+        return errors.New("unauthenticated")
     }
     if actor.Role != "admin" {
-        return fmt.Errorf("admin only")
+        return errors.New("admin only")
     }
     return nil
 }
 ```
 
-Denial maps to `403`. Runs before decode, so unauthorized callers with malformed bodies get `403`, not `400`. That is deliberate: don't leak information about body parseability to callers who were never allowed to submit.
+Return `nil` to allow, any error to deny. The library wraps the error in `*AuthorizationError` with HTTP status 403.
 
-The actor comes from the request context. `reqval` does not invent an actor model; put your actor into the context before calling `BindCtx` / `BindGin`:
+The actor comes from the request context. `reqval` does not invent an actor model; put your actor in the context before calling `BindCtx` / `BindGin`:
 
 ```go
 type ctxKey int
@@ -416,57 +303,51 @@ ctx := context.WithValue(r.Context(), actorKey, Actor{ID: 1, Role: "admin"})
 r = r.WithContext(ctx)
 ```
 
-Then in your request struct:
+For requests with no auth check, omit the method (inherited from `reqval.Base`) or return `nil`.
 
-```go
-func ActorFrom(ctx context.Context) (Actor, bool) {
-    a, ok := ctx.Value(actorKey).(Actor)
-    return a, ok
-}
-```
+## Binding
 
-## Error handling
+Three functions, from most generic to most convenient:
 
-Three error types, all from the `reqval` package.
-
-| Type | Status | Unwrap with |
+| Function | Signature | Use |
 | :--- | :--- | :--- |
-| `*AuthorizationError` | `403` | `reqval.AsAuthorizationError(err)` |
-| `*ValidationError` | `422` | `reqval.AsValidationError(err)` |
-| any other `error` | `400` | plain `err` |
+| `Bind` | `Bind(r io.Reader, dst any) error` | Background context |
+| `BindCtx` | `BindCtx(ctx context.Context, r io.Reader, dst any) error` | With context |
+| `BindGin` | `BindGin(c *gin.Context, dst any) error` | Gin adapter |
 
-### `*ValidationError`
+All three do the same three steps in order:
 
-```go
-type ValidationError struct {
-    Fields map[string]string // field name -> human-readable message
-}
+1. Call `Authorize(ctx)`. Denial → `*AuthorizationError` (403).
+2. Decode JSON. Failure → the raw `json.Unmarshal` error (400).
+3. Validate. Failure → `*ValidationError` (422).
 
-func (e *ValidationError) Error() string       // for logging
-func (e *ValidationError) HTTPStatus() int     // always 422
-```
+### Choosing your response shape
 
-### `*AuthorizationError`
+The controller decides how to render the error. Two options:
 
-```go
-type AuthorizationError struct {
-    Message string
-}
-
-func (e *AuthorizationError) Error() string    // the Message, or "forbidden"
-func (e *AuthorizationError) HTTPStatus() int  // always 403
-```
-
-Discriminating in a handler:
+**Option A — the built-in helper (convenient):**
 
 ```go
 if err := reqval.BindGin(c, &req); err != nil {
-    if ae, ok := reqval.AsAuthorizationError(err); ok {
-        c.JSON(403, gin.H{"error": ae.Message})
+    reqval.AbortWithError(c, err)
+    return
+}
+```
+
+`AbortWithError` writes 403 / 422 / 400 with a JSON body and aborts the Gin context.
+
+**Option B — inspect the error yourself (flexible):**
+
+```go
+if err := reqval.BindGin(c, &req); err != nil {
+    if ve, ok := reqval.AsValidationError(err); ok {
+        // custom rendering: flash, redirect, HTML, whatever you want
+        c.Set("errors", ve.Fields)
+        c.Redirect(302, "/posts/create")
         return
     }
-    if ve, ok := reqval.AsValidationError(err); ok {
-        c.JSON(422, gin.H{"errors": ve.Fields})
+    if ae, ok := reqval.AsAuthorizationError(err); ok {
+        c.JSON(403, gin.H{"error": ae.Message})
         return
     }
     c.JSON(400, gin.H{"error": err.Error()})
@@ -474,52 +355,81 @@ if err := reqval.BindGin(c, &req); err != nil {
 }
 ```
 
-That is exactly what `reqval.AbortWithError(c, err)` does.
+This is the option that lets you flash errors on the session instead of returning JSON — the controller decides the medium.
 
-### Panics vs. errors
+## Error handling
 
-The library does not panic on user input. The only panic you can trigger is a programming error: an unregistered rule name in a `validate` tag. `go-playground/validator` panics on that because a rule name is code, not data. If you see `Undefined validation function`, the tag name is wrong. The table above is authoritative.
+Three error types:
 
-## Messages and translation
+| Type | Status | When | Unwrap with |
+| :--- | :--- | :--- | :--- |
+| `*AuthorizationError` | `403` | `Authorize` returned non-nil | `reqval.AsAuthorizationError(err)` |
+| `*ValidationError` | `422` | A rule failed | `reqval.AsValidationError(err)` |
+| other | `400` | JSON decode failure, empty body, I/O error | plain `err` |
 
-Built-in rules have default English messages. Custom rules have their own defaults. You can override at three levels, resolved in this priority order:
+`ValidationError.Fields` is `map[string]string` — field name to message.
 
-1. **Field-specific override** — highest priority
-2. **Tag-wide template** — middle
-3. **Built-in default** — lowest
+## Database rules
 
-### Tag-wide override
+### Setup
+
+For `unique` and `exists`, register a database once at startup:
 
 ```go
-reqval.RegisterMessage("required", "Please fill in {{field}}.")
+reqval.RegisterDB(db)
 ```
 
-Placeholders: `{{field}}` (the Go field name) and `{{param}}` (the rule's parameter, e.g. the number in `max=255`).
-
-### Field-specific override
+`db` can be `*sql.DB`, `*sql.Tx`, `sqlx.DB`, or anything with a matching `QueryRowContext` method:
 
 ```go
-reqval.RegisterFieldMessage("StorePostRequest", "Title", "We really need a title.")
-```
-
-Field name is the Go field name (`Title`), not the JSON tag name (`title`).
-
-### Translation bundle
-
-```go
-reqval.LoadZH() // Chinese defaults for the built-in rules
-```
-
-After `LoadZH()`, all built-in tags render Chinese messages. Field-specific overrides still win, as the priority order says.
-
-Writing your own bundle is just a series of `RegisterMessage` calls:
-
-```go
-func LoadFR() {
-    reqval.RegisterMessage("required", "Le champ {{field}} est obligatoire.")
-    reqval.RegisterMessage("max", "Le champ {{field}} ne peut pas dépasser {{param}} caractères.")
+type DBQuerier interface {
+    QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 ```
+
+### unique
+
+```
+"unique:<table>,<column>"
+"unique:<table>,<column>,<idColumn>,<ignoreID>"
+```
+
+- **2 params** — plain uniqueness: `SELECT COUNT(*) FROM <table> WHERE <column> = ?`
+- **4 params** — exclusion: `... WHERE <column> = ? AND <idColumn> <> <ignoreID>`. Use on update to exclude the row you're editing.
+
+```go
+func (r *StoreUserRequest) Rules() map[string][]string {
+    return map[string][]string{
+        "Username": {"required", "unique:users,username"},
+    }
+}
+
+func (r *UpdateUserRequest) Rules() map[string][]string {
+    return map[string][]string{
+        "Username": {"required", "unique:users,username,id," + strconv.FormatInt(r.ID, 10)},
+    }
+}
+```
+
+### exists
+
+```
+"exists:<table>,<column>"
+```
+
+```go
+func (r *StorePostRequest) Rules() map[string][]string {
+    return map[string][]string{
+        "CategoryID": {"required", "exists:categories,id"},
+    }
+}
+```
+
+Zero values skip the check; `required` catches them first.
+
+### SQL injection safety
+
+Table and column names are validated against `^[a-zA-Z_][a-zA-Z0-9_]*$` before splicing. Anything containing `;`, quotes, or spaces fails closed.
 
 ## Examples
 
@@ -531,13 +441,8 @@ Runnable programs in `examples/`:
 | `errors/` | 422 error shape |
 | `http/` | net/http binding |
 | `gin/` | Gin binding |
-| `messages/` | Message overrides |
-| `unique/` | Create + update uniqueness |
-| `exists/` | Foreign-key check |
-| `authz/` | 403 before decode |
-| `full/` | All features together |
-| `dynamic/` | Dynamic ignore ID |
-| `rules/` | Full rule set |
+| `messages/` | Fallback, bundle, and override in one file |
+| `rules/` | The full rule set |
 
 Run any of them:
 
@@ -555,53 +460,92 @@ go test -timeout 60s -race ./...
 
 All tests must print `PASS` and `ok github.com/thomas666-beast/reqval`.
 
+## Differences from Laravel
+
+`reqval` is inspired by Laravel's Form Requests, not a clone. The differences are deliberate.
+
+| Laravel | reqval | Why |
+| :--- | :--- | :--- |
+| `php artisan make:request X` | Not implemented yet | See [Roadmap](#roadmap) |
+| Rules in `rules()` method | Rules in `Rules()` method | Same idea, Go syntax |
+| Messages in `messages()` method | Messages in `Messages()` method | Same idea, Go syntax |
+| `authorize()` returns bool | `Authorize()` returns `error` | Errors carry messages for the 403 body |
+| Global `lang/` files | `SetDefaultMessages(bundle)` | Explicit, testable, no filesystem coupling |
+| Rules computed at runtime (`Rule::unique()->ignore($id)`) | Runtime via `strconv.FormatInt(r.ID, 10)` in `Rules()` | Idiomatic Go; no magic injection |
+| Response via `ValidationException` handler | Error returned; controller decides | Go has no global handler; explicit is better |
+
+The one significant missing feature is the `make:request` generator. The rest is either matched or intentionally adapted to Go.
+
+## Roadmap
+
+Not implemented yet:
+
+- `reqval new request <Name>` scaffold command (`make:request` equivalent)
+- `BindForm` for `application/x-www-form-urlencoded`
+- Fiber adapter
+- `nullable`, `sometimes`, `required_if`
+- `unique` with additional `where` conditions
+- Richer `exists` variants (`exists:table,column,where:active,1`)
+
 ## FAQ
 
-### Why `reqval` and not just `go-playground/validator`?
+### Why not just use `go-playground/validator`?
 
-`go-playground/validator` is the rule engine. `reqval` is the glue around it: decode, authorize, validate, format errors, map to status codes, and thread a database in for `unique` / `exists`. You can absolutely use validator directly and wire all that up yourself. `reqval` is the wiring, packaged.
+Because that gives you the rule engine, not the glue. `reqval` wraps it with the Form Request pattern: one request file per form, messages colocated, authorization before decode, consistent error types, and a controller that doesn't mention validation at all.
 
-### Why do I need to embed `reqval.Base`?
+### Why does the request embed `reqval.Base`?
 
-It is a marker interface. The binding functions need a common type to accept, and embedding a zero-sized struct is the least intrusive way to provide one. You never call anything on it, and it adds nothing to your struct's size.
+To satisfy the `Request` interface with empty defaults so you only write the methods you need. It is a zero-sized struct — embedding it costs nothing.
 
-### Why is authorization before decode?
+### Why do rules live in a method, not struct tags?
 
-Order matters for security. A non-admin sending malformed JSON should get `403`, not `400`, because they were never allowed to submit. Decoding first would leak whether their JSON was well-formed, which is information they shouldn't have. Laravel does the same thing with `FormRequest::authorize()`.
+Tags are static: computed at compile time, cannot depend on runtime values. Rules in a method can — including the current row ID for update uniqueness checks. Laravel made the same choice with `rules()`.
 
-### Can a policy method call another policy method?
+### Why does authorization run before decode?
 
-There are no policy classes in `reqval` — authorization lives on the request struct itself. If you want shared logic, extract a helper function and call it from multiple `Authorize` methods. That is simpler than a policy layer and produces the same result.
+A non-admin sending malformed JSON should get 403, not 400. Decoding first would leak information about body parseability to callers who were never allowed to submit.
 
-### How do I check permissions without an object?
+### Why is there no `can()` helper like Laravel's?
 
-`reqval`'s authorization is about *requests*, not *objects*. If you need a check that has no request body — "is this user an admin?" — do it in middleware, before the request reaches the handler. `reqval` is the right tool when the answer depends on what the request body says.
+Because Go's method dispatch and Gin's context don't have a slot for one. In Laravel, `$this->can(...)` works because the base class knows the user. In `reqval`, the actor is in the context, and policies are not a concept the library models. If you need object-level authorization (not request-level), that's a separate library — `reqval` is about requests.
 
-### How do I handle unauthenticated users?
-
-Return an error from `Authorize` when the actor is missing. That maps to `403`. If you'd prefer unauthenticated users to be redirected to a login page, check the actor in your handler before calling `BindCtx`:
+### How do I translate messages?
 
 ```go
-if ActorFrom(r.Context()) == nil {
-    http.Redirect(w, r, "/login", http.StatusSeeOther)
+reqval.SetDefaultMessages(reqval.ZH())
+```
+
+Or per-request:
+
+```go
+func (r *StorePostRequest) Messages() map[string]string {
+    return reqval.ZH()
+}
+```
+
+For a custom language, write a function that returns `map[string]string` and pass it to `SetDefaultMessages`. The library contains no rule-specific English, so there is nothing in the source to edit.
+
+### Can I use `reqval` with `net/http` directly?
+
+Yes. `BindCtx(r.Context(), r.Body, &req)` returns the same error types. Render them however you like:
+
+```go
+if err := reqval.BindCtx(r.Context(), r.Body, &req); err != nil {
+    if ve, ok := reqval.AsValidationError(err); ok {
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(422)
+        json.NewEncoder(w).Encode(map[string]any{"errors": ve.Fields})
+        return
+    }
+    http.Error(w, err.Error(), 400)
     return
 }
 ```
 
-`reqval` does not impose a policy on this; you decide how unauthenticated access is handled.
+### Why does the `gin` example show fallback messages?
 
-### Can I use this with sqlx, GORM, pgx?
-
-Yes for `sqlx` — `*sqlx.DB` satisfies `DBQuerier` directly. For GORM and pgx, wrap the underlying connection in a small adapter that exposes `QueryRowContext(ctx, query, args ...any) *sql.Row`. The library only ever calls that one method.
-
-### What about `FormRequest`-style per-form classes?
-
-In Go, a "per-form class" is a struct. That struct *is* your FormRequest. There is no second layer to learn.
-
-### Why does `regexp` panic if I write `regex`?
-
-Because `regex` is not a registered rule name. `go-playground/validator` panics on unknown rule names because a rule name is code, not data — it can't fall back to a runtime error without hiding typos. The fix is to write `regexp`.
+If you run `go run ./examples/gin` and see `"The Title field is invalid."`, that example is missing a `Messages()` method on its request type and no default bundle was installed. Add `Messages()` or call `SetDefaultMessages` at startup. The `messages` example shows all three resolution levels side by side.
 
 ## License
 
-This library is free software; you can redistribute it and/or modify it under the same terms as Go itself.
+MIT.
