@@ -52,6 +52,16 @@ That is the entire integration surface. `reqval` never touches transactions, nev
 
 Registration is safe to call more than once; the most recent database wins. That is useful in tests, where each test creates its own in-memory database.
 
+### PostgreSQL placeholder style
+
+SQLite and MySQL use `?` as the placeholder. PostgreSQL uses `$1`, `$2`, etc.
+`reqval` does not detect the driver — you declare the style at registration:
+
+```go
+db, _ := sql.Open("pgx", dsn)      // or "postgres"
+reqval.RegisterDBWithPlaceholder(db, "$")
+```
+
 ## `unique`
 
 Checks that a value does not already exist in `<table>.<column>`. Fails if the count is greater than zero.

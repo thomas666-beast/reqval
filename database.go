@@ -13,31 +13,61 @@ type DBQuerier interface {
 }
 
 var (
-	dbMu    sync.RWMutex
-	querier DBQuerier
-	errNoDB = errors.New("reqval: no DB registered; call reqval.RegisterDB first")
+	dbMu             sync.RWMutex
+	querier          DBQuerier
+	placeholderStyle = "?" // "?" for SQLite/MySQL, "$" for PostgreSQL
+	errNoDB          = errors.New("reqval: no DB registered; call reqval.RegisterDB first")
 )
 
 // RegisterDB wires a database for unique/exists rules.
 // Safe to call more than once.
+//
+// Placeholder style defaults to "?" (SQLite, MySQL, MariaDB).
+// For PostgreSQL call RegisterDBWithPlaceholder(db, "$") instead.
 func RegisterDB(db DBQuerier) {
 	dbMu.Lock()
 	defer dbMu.Unlock()
 	querier = db
+	placeholderStyle = "?"
 }
 
-func getDB() (DBQuerier, error) {
+// RegisterDBWithPlaceholder wires a database and sets the SQL placeholder
+// style used by unique/exists rules.
+//
+// style must be "?" (SQLite, MySQL, MariaDB) or "$" (PostgreSQL).
+// Any other value falls back to "?".
+func RegisterDBWithPlaceholder(db DBQuerier, style string) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+	querier = db
+	switch style {
+	case "$":
+		placeholderStyle = "$"
+	default:
+		placeholderStyle = "?"
+	}
+}
+
+func getDB() (DBQuerier, string, error) {
 	dbMu.RLock()
 	defer dbMu.RUnlock()
 	if querier == nil {
-		return nil, errNoDB
+		return nil, "", errNoDB
 	}
-	return querier, nil
+	return querier, placeholderStyle, nil
+}
+
+// ph renders a placeholder for the given 1-based index.
+func ph(style string, n int) string {
+	if style == "$" {
+		return fmt.Sprintf("$%d", n)
+	}
+	return "?"
 }
 
 // checkUnique handles "unique:table,column" and "unique:table,column,idCol,ignoreID".
 func checkUnique(ctx context.Context, param string, val any) bool {
-	db, err := getDB()
+	db, style, err := getDB()
 	if err != nil {
 		return false
 	}
@@ -66,12 +96,18 @@ func checkUnique(ctx context.Context, param string, val any) bool {
 
 	var count int
 	if ignoreID != "" {
-		q := fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE %s = ? AND %s <> ?", table, column, idColumn)
+		q := fmt.Sprintf(
+			"SELECT COUNT(*) FROM %s WHERE %s = %s AND %s <> %s",
+			table, column, ph(style, 1), idColumn, ph(style, 2),
+		)
 		if err := db.QueryRowContext(ctx, q, s, ignoreID).Scan(&count); err != nil {
 			return false
 		}
 	} else {
-		q := fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE %s = ?", table, column)
+		q := fmt.Sprintf(
+			"SELECT COUNT(*) FROM %s WHERE %s = %s",
+			table, column, ph(style, 1),
+		)
 		if err := db.QueryRowContext(ctx, q, s).Scan(&count); err != nil {
 			return false
 		}
@@ -81,7 +117,7 @@ func checkUnique(ctx context.Context, param string, val any) bool {
 
 // checkExists handles "exists:table,column".
 func checkExists(ctx context.Context, param string, val any) bool {
-	db, err := getDB()
+	db, style, err := getDB()
 	if err != nil {
 		return false
 	}
@@ -98,7 +134,10 @@ func checkExists(ctx context.Context, param string, val any) bool {
 		return true
 	}
 
-	q := fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE %s = ?", table, column)
+	q := fmt.Sprintf(
+		"SELECT COUNT(*) FROM %s WHERE %s = %s",
+		table, column, ph(style, 1),
+	)
 	var count int
 	if err := db.QueryRowContext(ctx, q, val).Scan(&count); err != nil {
 		return false
